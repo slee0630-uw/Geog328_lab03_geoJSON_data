@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en-US">
+    <head>
+        <meta charset="utf-8" />
+        <title>US Earthquakes — Async GeoJSONp</title>
+        <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+        <script src="https://unpkg.com/maplibre-gl@^5.9.0/dist/maplibre-gl.js"></script>
+        <link href="https://unpkg.com/maplibre-gl@^5.9.0/dist/maplibre-gl.css" rel="stylesheet" />
+
+        <style>
+            html, body { height: 100%; }
+            body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+
+            /* Fullscreen map */
+            #map { position: fixed; inset: 0; }
+
+            /* Right floating side panel */
+            #side-panel {
+                position: fixed;
+                top: 16px;
+                right: 16px;
+                width: min(36vw, 520px);
+                max-height: calc(100vh - 32px);
+                overflow: auto;
+                background: rgba(255,255,255,0.92);
+                backdrop-filter: saturate(120%) blur(6px);
+                border: 1px solid rgba(0,0,0,0.08);
+                border-radius: 12px;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+                padding: 16px;
+                box-sizing: border-box;
+            }
+
+            h2 { margin: 0 0 4px 0; font-size: 20px; }
+            p.caption { margin: 0 0 12px 0; font-size: 12px; color: #555; }
+
+            .controls { display:flex; gap:8px; margin: 8px 0 12px; }
+            button { padding: 8px 12px; border: 1px solid #ccc; background:#f8f8f8; cursor:pointer; border-radius: 8px; }
+            button:hover { background:#f0f0f0; }
+
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                border: 1px solid #e5e5e5;
+                font-size: 14px;
+            }
+            th, td { padding: 16px; text-align: left;}
+            tr:nth-child(even) { background: #fbfbfb; }
+
+            /* <=1024px: hide side panel per rubric */
+            @media (max-width: 1024px) {
+                #side-panel { display: none; }
+            }
+        </style>
+    </head>
+    <body>
+        <div id="map"></div>
+
+        <aside id="side-panel" aria-label="Data table">
+            <h2>US Earthquakes</h2>
+            <p class="caption">Async GeoJSON · Right floating panel</p>
+
+            <div class="controls">
+                <button id="sortDesc">Sort Down</button>
+                <button id="sortAsc">Sort Up</button>
+            </div>
+
+            <table id="data-table"></table>
+        </aside>
+
+        <script>
+            const POINTS_URL = 'assets/usearthquakes.geojson';   // US earthquakes (points)
+            const POLY_URL   = 'assets/us-contiguous.json';      // US contiguous boundary (polygons)
+
+
+            /* Different basemap from earthquake.html (use OSM vector style) */
+            const map = new maplibregl.Map({
+                container: 'map',
+                center: [-98.5, 38.5],  // USA center-ish
+                zoom: 3.8,
+                style: 'https://demotiles.maplibre.org/style.json'
+            });
+            map.addControl(new maplibregl.NavigationControl(), 'top-right');
+            map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'imperial' }));
+
+            async function geojsonFetch() {
+                // Fetch both GeoJSONs (no try/catch as requested)
+                const [resPts, resPoly] = await Promise.all([
+                    fetch(POINTS_URL),
+                    fetch(POLY_URL)
+                ]);
+                const [points, polys] = await Promise.all([resPts.json(), resPoly.json()]);
+
+                map.on('load', () => {
+                // polygons (fill + outline)
+                map.addSource('us-poly', { type: 'geojson', data: polys });
+                map.addLayer({
+                    id: 'us-fill',
+                    type: 'fill',
+                    source: 'us-poly',
+                    paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.18 }
+                });
+                map.addLayer({
+                    id: 'us-outline',
+                    type: 'line',
+                    source: 'us-poly',
+                    paint: { 'line-color': '#1e40af', 'line-width': 1.25 }
+                });
+
+                // points (earthquakes)
+                map.addSource('quakes', { type: 'geojson', data: points });
+                map.addLayer({
+                    id: 'quakes-circles',
+                    type: 'circle',
+                    source: 'quakes',
+                    paint: {
+                        // size by magnitude
+                        'circle-radius': [
+                            'interpolate', ['linear'], ['to-number', ['get', 'mag'], 0],
+                            1, 3,
+                            3, 6,
+                            5, 10,
+                            6, 14
+                        ],
+                        'circle-color': '#ef4444',
+                        'circle-stroke-color': '#ffffff',
+                        'circle-stroke-width': 1.25,
+                        'circle-opacity': 0.9
+                    }
+                });
+
+             // popups
+                map.on('click', 'quakes-circles', (e) => {
+                    const f = e.features && e.features[0];
+                    const p = f ? f.properties : {};
+                    const when = p && p.time ? new Date(Number(p.time)).toLocaleString('en-US') : '(n/a)';
+                    const html = `
+                        <div><strong>${p && p.place ? p.place : '(unknown place)'}</strong></div>
+                        <div>mag: ${p && p.mag != null ? p.mag : '(n/a)'}</div>
+                        <div>time: ${when}</div>
+                    `;
+                    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
+                });
+                map.on('mouseenter', 'quakes-circles', () => map.getCanvas().style.cursor = 'pointer');
+                map.on('mouseleave', 'quakes-circles', () => map.getCanvas().style.cursor = '');
+
+                // Fit to polygons if bbox exists, else keep default view
+                if (polys && polys.bbox && polys.bbox.length === 4) {
+                    const b = polys.bbox; // [minX,minY,maxX,maxY]
+                    map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 40, duration: 800 });
+                    }
+                });
+
+                // Build the table from points
+                buildTable(points);
+            }
+
+            function buildTable(geojson) {
+                const table = document.getElementById('data-table');
+                const cols = ['Magnitude', 'Place', 'Time']; 
+
+                const thead = document.createElement('thead');
+                const hr = document.createElement('tr');
+                cols.forEach(k => { const th = document.createElement('th'); th.textContent = k; hr.appendChild(th); });
+                thead.appendChild(hr);
+                table.appendChild(thead);
+
+                const tbody = document.createElement('tbody');
+                (geojson.features || []).forEach(ft => {
+                    const p = ft.properties || {};
+                    const tr = document.createElement('tr');
+                    const vals = [
+                        p.mag ?? '(n/a)',
+                        p.place ?? '(n/a)',
+                        p.time ? new Date(Number(p.time)).toLocaleString('en-US') : '(n/a)'
+                    ];
+                    vals.forEach(v => {
+                        const td = document.createElement('td');
+                        td.textContent = v;
+                        tr.appendChild(td);
+                    });
+                    tbody.appendChild(tr);
+                });
+                table.appendChild(tbody);
+
+                const sortByMag = (dir='desc') => {
+                    const rows = Array.from(tbody.querySelectorAll('tr'));
+                    rows.sort((a, b) => {
+                        const ax = parseFloat(a.children[0]?.textContent);
+                        const bx = parseFloat(b.children[0]?.textContent);
+                        const A = isNaN(ax) ? -Infinity : ax;
+                        const B = isNaN(bx) ? -Infinity : bx;
+                        return dir === 'desc' ? B - A : A - B;
+                    });
+                    rows.forEach(r => tbody.appendChild(r));
+                };
+
+                document.getElementById('sortDesc').addEventListener('click', () => sortByMag('desc'));
+                document.getElementById('sortAsc').addEventListener('click', () => sortByMag('asc'));
+            }
+
+             // Kick off (no try/catch)
+             geojsonFetch();
+        </script>
+
+    </body>
+</html>
